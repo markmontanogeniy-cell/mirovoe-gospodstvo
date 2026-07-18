@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
-  Rocket, Target, Check, X,
-  AlertTriangle, Trophy, Radio, Plus, Trash2, ChevronRight, Landmark
+  Rocket, Target, Check, X, AlertTriangle, Trophy, Radio, Plus, Trash2,
+  ChevronRight, Landmark, Lock, Loader2,
 } from "lucide-react";
+import { db, ref, onValue, set as fbSet } from "./firebase";
 
 const TECH_COST = 70;
 const MISSILE_COST = 30;
@@ -15,10 +16,17 @@ const START_GOLD = 100;
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
-function freshCountry(name, capitalName, cityNames) {
+async function hashPassword(pw) {
+  const enc = new TextEncoder().encode(pw.trim());
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function freshCountry(name, capitalName, cityNames, passwordHash) {
   return {
     id: uid(),
     name,
+    passwordHash,
     gold: START_GOLD,
     techResearched: false,
     techReadyRound: null,
@@ -48,37 +56,59 @@ function canBuildMissiles(country, round) {
   return country.techResearched && country.techReadyRound !== null && round >= country.techReadyRound;
 }
 
-// ============================================================================
-// LOCAL STORAGE HELPERS
-// ============================================================================
-const gameStateKey = "mg:gameState";
-const ordersKeyLocal = (round, countryId) => `mg:orders:${round}:${countryId}`;
+const emptyState = { round: 1, countries: [], log: [], started: false, ended: false, gmPasswordHash: null };
 
-function loadGameState() {
-  const raw = localStorage.getItem(gameStateKey);
-  return raw ? JSON.parse(raw) : { round: 1, countries: [], log: [], started: false, ended: false };
+// ============================================================================
+// FIREBASE-BACKED STATE (real-time, синхронно на всех устройствах)
+// ============================================================================
+function useGameState() {
+  const [state, setState] = useState(emptyState);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    const stateRef = ref(db, "gameState");
+    const unsub = onValue(
+      stateRef,
+      (snap) => {
+        const val = snap.val();
+        setState(val || emptyState);
+        setLoaded(true);
+      },
+      () => setLoaded(true)
+    );
+    return () => unsub();
+  }, []);
+
+  const saveState = useCallback((next) => {
+    fbSet(ref(db, "gameState"), next);
+  }, []);
+
+  return [state, saveState, loaded];
 }
 
-function saveGameState(state) {
-  localStorage.setItem(gameStateKey, JSON.stringify(state));
+function useRoundOrders(round) {
+  const [orders, setOrders] = useState({});
+  useEffect(() => {
+    const ordersRef = ref(db, `orders/${round}`);
+    const unsub = onValue(ordersRef, (snap) => setOrders(snap.val() || {}));
+    return () => unsub();
+  }, [round]);
+  return orders;
 }
 
-function loadOrder(round, countryId) {
-  const raw = localStorage.getItem(ordersKeyLocal(round, countryId));
-  return raw ? JSON.parse(raw) : null;
+function useMyOrder(round, countryId) {
+  const [order, setOrder] = useState(null);
+  useEffect(() => {
+    if (!countryId) return;
+    const orderRef = ref(db, `orders/${round}/${countryId}`);
+    const unsub = onValue(orderRef, (snap) => setOrder(snap.val() || null));
+    return () => unsub();
+  }, [round, countryId]);
+  return order;
 }
 
 function saveOrder(round, countryId, order) {
-  localStorage.setItem(ordersKeyLocal(round, countryId), JSON.stringify(order));
-}
-
-function listOrdersForRound(round, countryIds) {
-  const orders = {};
-  for (const cid of countryIds) {
-    const o = loadOrder(round, cid);
-    if (o) orders[cid] = o;
-  }
-  return orders;
+  fbSet(ref(db, `orders/${round}/${countryId}`), order);
 }
 
 // ============================================================================
@@ -86,22 +116,24 @@ function listOrdersForRound(round, countryIds) {
 // ============================================================================
 export default function App() {
   const [role, setRole] = useState(null);
-  const [state, setState] = useState(() => loadGameState());
+  const [state, saveState, loaded] = useGameState();
 
-  const saveState = useCallback((next) => {
-    setState(next);
-    saveGameState(next);
-  }, []);
+  if (!loaded) {
+    return (
+      <Shell>
+        <div className="flex items-center gap-3 text-[#8A93A0] justify-center py-24">
+          <Loader2 className="animate-spin" size={20} />
+          <span className="tracking-wide uppercase text-sm">Связь со штабом…</span>
+        </div>
+      </Shell>
+    );
+  }
 
   return (
     <Shell>
       {!role && <RoleSelect onSelect={setRole} />}
-      {role === "gm" && (
-        <GmView state={state} saveState={saveState} onBack={() => setRole(null)} />
-      )}
-      {role === "player" && (
-        <PlayerView state={state} onBack={() => setRole(null)} />
-      )}
+      {role === "gm" && <GmView state={state} saveState={saveState} onBack={() => setRole(null)} />}
+      {role === "player" && <PlayerView state={state} onBack={() => setRole(null)} />}
     </Shell>
   );
 }
@@ -120,8 +152,7 @@ function Shell({ children }) {
         @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
         .blinker { animation: blink 1.6s ease-in-out infinite; }
         .mono { font-family: 'JetBrains Mono','Courier New',monospace; }
-        ::selection { background:#E8A33D55; }
-        .input { background:#101317;border:1px solid #2A3138;border-radius:8px;padding:10px 12px;font-size:14px;color:#ECEEEF; outline:none; }
+        .input { background:#101317;border:1px solid #2A3138;border-radius:8px;padding:10px 12px;font-size:14px;color:#ECEEEF; outline:none; width:100%; }
         .input:focus { border-color:#E8A33D; }
         .btn-amber { background:#E8A33D;color:#171200;font-weight:700;text-transform:uppercase;letter-spacing:.05em;font-size:13px;padding:10px 18px;border-radius:8px;border:none;cursor:pointer; }
         .btn-amber:disabled { opacity:.4;cursor:not-allowed; }
@@ -162,6 +193,57 @@ function Panel({ children, className = "" }) {
 }
 
 // ============================================================================
+// PASSWORD GATE (переиспользуемый)
+// ============================================================================
+function PasswordGate({ title, subtitle, expectedHash, onSuccess, onBack, sessionKey }) {
+  const [pw, setPw] = useState("");
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+
+  const submit = async () => {
+    if (!pw) return;
+    setChecking(true);
+    const h = await hashPassword(pw);
+    if (h === expectedHash) {
+      try { sessionStorage.setItem(sessionKey, "1"); } catch {}
+      onSuccess();
+    } else {
+      setError("Неверный пароль");
+    }
+    setChecking(false);
+  };
+
+  return (
+    <div>
+      <Header title={title} subtitle={subtitle} onBack={onBack} />
+      <Panel className="p-6 max-w-sm mx-auto text-center">
+        <Lock className="mx-auto text-[#E8A33D] mb-4" size={28} />
+        <input
+          type="password"
+          value={pw}
+          onChange={(e) => { setPw(e.target.value); setError(""); }}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          placeholder="Пароль"
+          className="input text-center mb-3"
+          autoFocus
+        />
+        {error && <div className="text-[#D1453A] text-xs mb-3">{error}</div>}
+        <button onClick={submit} disabled={checking || !pw} className="btn-amber w-full">
+          {checking ? "Проверка…" : "Войти"}
+        </button>
+      </Panel>
+    </div>
+  );
+}
+
+function useUnlocked(sessionKey) {
+  const [unlocked] = useState(() => {
+    try { return sessionStorage.getItem(sessionKey) === "1"; } catch { return false; }
+  });
+  return unlocked;
+}
+
+// ============================================================================
 // ROLE SELECT
 // ============================================================================
 function RoleSelect({ onSelect }) {
@@ -169,10 +251,7 @@ function RoleSelect({ onSelect }) {
     <div>
       <Header title="Мировое господство" subtitle="Выберите, как вы заходите в игру" />
       <div className="grid sm:grid-cols-2 gap-5">
-        <button
-          onClick={() => onSelect("gm")}
-          className="text-left p-6 rounded-xl border border-[#2A3138] bg-[#171B1F] hover:border-[#E8A33D] transition group"
-        >
+        <button onClick={() => onSelect("gm")} className="text-left p-6 rounded-xl border border-[#2A3138] bg-[#171B1F] hover:border-[#E8A33D] transition group">
           <Landmark className="text-[#E8A33D] mb-4" size={28} />
           <div className="text-lg font-bold uppercase tracking-wide">Я ведущий</div>
           <p className="text-[#8A93A0] text-sm mt-2">Настройка стран, приём приказов, разрешение раундов.</p>
@@ -180,10 +259,7 @@ function RoleSelect({ onSelect }) {
             Открыть штаб <ChevronRight size={14} />
           </div>
         </button>
-        <button
-          onClick={() => onSelect("player")}
-          className="text-left p-6 rounded-xl border border-[#2A3138] bg-[#171B1F] hover:border-[#5FA05B] transition group"
-        >
+        <button onClick={() => onSelect("player")} className="text-left p-6 rounded-xl border border-[#2A3138] bg-[#171B1F] hover:border-[#5FA05B] transition group">
           <Target className="text-[#5FA05B] mb-4" size={28} />
           <div className="text-lg font-bold uppercase tracking-wide">Я играю за страну</div>
           <p className="text-[#8A93A0] text-sm mt-2">Выберите свою страну и отправьте приказ на раунд.</p>
@@ -197,15 +273,62 @@ function RoleSelect({ onSelect }) {
 }
 
 // ============================================================================
-// GM VIEW
+// GM VIEW (с паролем на комнату)
 // ============================================================================
 function GmView({ state, saveState, onBack }) {
-  const started = state.countries.length > 0 && state.started;
+  const alreadyUnlocked = useUnlocked("mg_gm_unlocked");
+  const [unlocked, setUnlocked] = useState(alreadyUnlocked);
 
-  if (!started) {
+  if (!state.gmPasswordHash) {
+    return <GmCreateRoom saveState={saveState} onBack={onBack} />;
+  }
+
+  if (!unlocked) {
+    return (
+      <PasswordGate
+        title="Комната ведущего"
+        subtitle="Введите пароль ведущего"
+        expectedHash={state.gmPasswordHash}
+        onSuccess={() => setUnlocked(true)}
+        onBack={onBack}
+        sessionKey="mg_gm_unlocked"
+      />
+    );
+  }
+
+  if (!state.started) {
     return <GmSetup state={state} saveState={saveState} onBack={onBack} />;
   }
   return <GmDashboard state={state} saveState={saveState} onBack={onBack} />;
+}
+
+function GmCreateRoom({ saveState, onBack }) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const create = async () => {
+    if (pw.length < 4) return setError("Минимум 4 символа");
+    if (pw !== pw2) return setError("Пароли не совпадают");
+    setSaving(true);
+    const hash = await hashPassword(pw);
+    saveState({ ...emptyState, gmPasswordHash: hash });
+    try { sessionStorage.setItem("mg_gm_unlocked", "1"); } catch {}
+    setSaving(false);
+  };
+
+  return (
+    <div>
+      <Header title="Создание комнаты" subtitle="Придумайте пароль ведущего — он понадобится, чтобы зайти в штаб с другого устройства" onBack={onBack} />
+      <Panel className="p-6 max-w-sm mx-auto">
+        <input type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Пароль ведущего" className="input mb-3" />
+        <input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} placeholder="Повторите пароль" className="input mb-3" />
+        {error && <div className="text-[#D1453A] text-xs mb-3">{error}</div>}
+        <button onClick={create} disabled={saving} className="btn-amber w-full">Создать комнату</button>
+      </Panel>
+    </div>
+  );
 }
 
 function GmSetup({ state, saveState, onBack }) {
@@ -214,36 +337,39 @@ function GmSetup({ state, saveState, onBack }) {
   const [c2, setC2] = useState("");
   const [c3, setC3] = useState("");
   const [c4, setC4] = useState("");
+  const [pw, setPw] = useState("");
 
-  const addCountry = () => {
-    if (!name.trim() || !capital.trim() || !c2.trim() || !c3.trim() || !c4.trim()) return;
-    const country = freshCountry(name.trim(), capital.trim(), [c2.trim(), c3.trim(), c4.trim()]);
+  const addCountry = async () => {
+    if (!name.trim() || !capital.trim() || !c2.trim() || !c3.trim() || !c4.trim() || pw.length < 4) return;
+    const hash = await hashPassword(pw);
+    const country = freshCountry(name.trim(), capital.trim(), [c2.trim(), c3.trim(), c4.trim()], hash);
     saveState({ ...state, countries: [...state.countries, country] });
-    setName(""); setCapital(""); setC2(""); setC3(""); setC4("");
+    setName(""); setCapital(""); setC2(""); setC3(""); setC4(""); setPw("");
   };
 
-  const removeCountry = (id) => {
-    saveState({ ...state, countries: state.countries.filter((c) => c.id !== id) });
-  };
+  const removeCountry = (id) => saveState({ ...state, countries: state.countries.filter((c) => c.id !== id) });
 
   const startGame = () => {
     saveState({ ...state, started: true, round: 1, log: [{ round: 0, text: "Игра началась. Приём приказов на раунд 1." }] });
   };
 
+  const canAdd = name.trim() && capital.trim() && c2.trim() && c3.trim() && c4.trim() && pw.length >= 4;
+
   return (
     <div>
-      <Header title="Штаб · Настройка" subtitle="Добавьте страны перед началом партии" onBack={onBack} />
+      <Header title="Штаб · Настройка" subtitle="Добавьте страны и придумайте пароль для каждой" onBack={onBack} />
 
       <Panel className="p-5 mb-6">
         <div className="text-sm uppercase tracking-wide text-[#8A93A0] mb-4">Новая страна</div>
-        <div className="grid sm:grid-cols-5 gap-3">
+        <div className="grid sm:grid-cols-5 gap-3 mb-3">
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Название страны" className="input" />
           <input value={capital} onChange={(e) => setCapital(e.target.value)} placeholder="Столица ★" className="input" />
           <input value={c2} onChange={(e) => setC2(e.target.value)} placeholder="Город 2" className="input" />
           <input value={c3} onChange={(e) => setC3(e.target.value)} placeholder="Город 3" className="input" />
           <input value={c4} onChange={(e) => setC4(e.target.value)} placeholder="Город 4" className="input" />
         </div>
-        <button onClick={addCountry} className="btn-amber mt-4 inline-flex items-center gap-2">
+        <input type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Пароль страны (мин. 4 символа) — сообщите его игрокам лично" className="input mb-3 sm:max-w-sm" />
+        <button onClick={addCountry} disabled={!canAdd} className="btn-amber inline-flex items-center gap-2">
           <Plus size={16} /> Добавить страну
         </button>
       </Panel>
@@ -266,33 +392,25 @@ function GmSetup({ state, saveState, onBack }) {
               </div>
             ))}
           </div>
+          <p className="text-xs text-[#8A93A0] mt-3">
+            Пароли не хранятся в открытом виде и не показываются здесь — запишите их себе отдельно (например в заметки), когда придумываете.
+          </p>
         </Panel>
       )}
 
-      <button
-        onClick={startGame}
-        disabled={state.countries.length < 2}
-        className="btn-amber disabled:opacity-30 w-full py-4 text-base flex items-center justify-center gap-2"
-      >
+      <button onClick={startGame} disabled={state.countries.length < 2} className="btn-amber disabled:opacity-30 w-full py-4 text-base flex items-center justify-center gap-2">
         Начать игру ({state.countries.length} стран) <ChevronRight size={18} />
       </button>
-      {state.countries.length < 2 && (
-        <p className="text-center text-xs text-[#8A93A0] mt-2">Добавьте минимум 2 страны</p>
-      )}
+      {state.countries.length < 2 && <p className="text-center text-xs text-[#8A93A0] mt-2">Добавьте минимум 2 страны</p>}
     </div>
   );
 }
 
 function GmDashboard({ state, saveState, onBack }) {
-  const [orders, setOrders] = useState({});
+  const orders = useRoundOrders(state.round);
   const [armed, setArmed] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [showScores, setShowScores] = useState(false);
-
-  useEffect(() => {
-    const allOrders = listOrdersForRound(state.round, state.countries.map((c) => c.id));
-    setOrders(allOrders);
-  }, [state.round, state.countries]);
 
   const activeCountries = state.countries.filter((c) => !c.eliminated);
   const submittedCount = Object.keys(orders).length;
@@ -303,7 +421,6 @@ function GmDashboard({ state, saveState, onBack }) {
     const countries = state.countries.map((c) => ({ ...c, cities: c.cities.map((ci) => ({ ...ci })) }));
     const log = [];
 
-    // 1. income
     for (const c of countries) {
       if (c.eliminated) continue;
       const income = countryIncome(c);
@@ -311,7 +428,6 @@ function GmDashboard({ state, saveState, onBack }) {
       log.push(`💰 ${c.name}: доход ${income} золота (казна: ${c.gold})`);
     }
 
-    // 2. purchases
     for (const c of countries) {
       if (c.eliminated) continue;
       const order = orders[c.id];
@@ -329,44 +445,31 @@ function GmDashboard({ state, saveState, onBack }) {
       const ecoQty = order.buyEcology || 0;
       spend += ecoQty * ECOLOGY_COST;
 
-      if (spend > c.gold) {
-        log.push(`⚠️ ${c.name}: приказ превышал бюджет`);
-        continue;
-      }
+      if (spend > c.gold) { log.push(`⚠️ ${c.name}: приказ превышал бюджет`); continue; }
       c.gold -= spend;
       if (order.buyTech && !c.techResearched) {
         c.techResearched = true;
         c.techReadyRound = round + 1;
         log.push(`⚛️ ${c.name} запускает ядерную программу`);
       }
-      if (missileQty > 0) {
-        c.missiles += missileQty;
-        log.push(`🚀 ${c.name} строит ракеты: +${missileQty}`);
-      }
+      if (missileQty > 0) { c.missiles += missileQty; log.push(`🚀 ${c.name} строит ракеты: +${missileQty}`); }
       for (const name of validShields) {
         const city = c.cities.find((ci) => ci.name === name);
         city.shielded = true;
       }
-      if (ecoQty > 0) {
-        c.ecologyLevel += ecoQty;
-        log.push(`🌱 ${c.name} экология: +${ecoQty}`);
-      }
+      if (ecoQty > 0) { c.ecologyLevel += ecoQty; log.push(`🌱 ${c.name} экология: +${ecoQty}`); }
     }
 
-    // 3. launches
     const flatLaunches = [];
     for (const c of countries) {
       const order = orders[c.id];
       if (!order || c.eliminated) continue;
-      const seenTargets = new Set();
+      const seen = new Set();
       for (const l of order.launches || []) {
         const key = l.targetCountryId + "::" + l.targetCity;
-        if (seenTargets.has(key)) continue;
-        seenTargets.add(key);
-        if (c.missiles > 0) {
-          c.missiles -= 1;
-          flatLaunches.push({ attackerId: c.id, attackerName: c.name, ...l });
-        }
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (c.missiles > 0) { c.missiles -= 1; flatLaunches.push({ attackerId: c.id, ...l }); }
       }
     }
     for (const l of flatLaunches) {
@@ -374,55 +477,30 @@ function GmDashboard({ state, saveState, onBack }) {
       if (!target || target.eliminated) continue;
       const city = target.cities.find((ci) => ci.name === l.targetCity);
       if (!city || !city.alive) continue;
-      if (city.shielded) {
-        city.shielded = false;
-        log.push(`🛡️💥 Щит города ${city.name} (${target.name}) сбит`);
-      } else {
-        city.alive = false;
-        log.push(`💥 Город ${city.name} (${target.name}) уничтожен!`);
-      }
+      if (city.shielded) { city.shielded = false; log.push(`🛡️💥 Щит города ${city.name} (${target.name}) сбит`); }
+      else { city.alive = false; log.push(`💥 Город ${city.name} (${target.name}) уничтожен!`); }
     }
 
-    // 4. elimination check
     for (const c of countries) {
-      if (!c.eliminated && c.cities.every((ci) => !ci.alive)) {
-        c.eliminated = true;
-        log.push(`☠️ ${c.name} выбывает из игры!`);
-      }
+      if (!c.eliminated && c.cities.every((ci) => !ci.alive)) { c.eliminated = true; log.push(`☠️ ${c.name} выбывает из игры!`); }
     }
 
     const remaining = countries.filter((c) => !c.eliminated);
     let ended = state.ended;
-    if (remaining.length === 1 && countries.length > 1) {
-      log.push(`🏆 ЯДЕРНАЯ ПОБЕДА: ${remaining[0].name}!`);
-      ended = true;
-    }
+    if (remaining.length === 1 && countries.length > 1) { log.push(`🏆 ЯДЕРНАЯ ПОБЕДА: ${remaining[0].name}!`); ended = true; }
 
-    const nextState = {
-      ...state,
-      countries,
-      round: round + 1,
-      log: [...state.log, ...log.map((text) => ({ round, text }))],
-      ended,
-    };
-    saveState(nextState);
+    saveState({ ...state, countries, round: round + 1, log: [...state.log, ...log.map((text) => ({ round, text }))], ended });
     setResolving(false);
     setArmed(false);
   };
 
   return (
     <div>
-      <Header
-        title={`Раунд ${state.round}`}
-        subtitle={`Приказы: ${submittedCount} / ${activeCountries.length}`}
-        onBack={onBack}
-      />
+      <Header title={`Раунд ${state.round}`} subtitle={`Приказы: ${submittedCount} / ${activeCountries.length}`} onBack={onBack} />
 
       {state.ended && (
         <Panel className="p-5 mb-6 border-[#E8A33D]">
-          <div className="flex items-center gap-2 text-[#E8A33D] font-bold uppercase mb-2">
-            <Trophy size={18} /> Игра окончена
-          </div>
+          <div className="flex items-center gap-2 text-[#E8A33D] font-bold uppercase mb-2"><Trophy size={18} /> Игра окончена</div>
         </Panel>
       )}
 
@@ -436,7 +514,7 @@ function GmDashboard({ state, saveState, onBack }) {
                 {c.eliminated ? (
                   <span className="text-xs text-[#D1453A] uppercase mono">выбыла</span>
                 ) : order ? (
-                  <span className="text-xs text-[#5FA05B] uppercase flex items-center gap-1 mono"><Check size={12}/> получен</span>
+                  <span className="text-xs text-[#5FA05B] uppercase flex items-center gap-1 mono"><Check size={12} /> получен</span>
                 ) : (
                   <span className="text-xs text-[#8A93A0] uppercase mono">ждём</span>
                 )}
@@ -463,10 +541,8 @@ function GmDashboard({ state, saveState, onBack }) {
       {!state.ended && (
         <Panel className="p-5 mb-6">
           <div className="flex items-center justify-between flex-wrap gap-4">
-            <div>
-              <div className="font-bold uppercase tracking-wide flex items-center gap-2">
-                <AlertTriangle size={16} className="text-[#E8A33D]" /> Раунд {state.round}
-              </div>
+            <div className="font-bold uppercase tracking-wide flex items-center gap-2">
+              <AlertTriangle size={16} className="text-[#E8A33D]" /> Раунд {state.round}
             </div>
             <div className="flex items-center gap-3">
               {!armed ? (
@@ -474,11 +550,7 @@ function GmDashboard({ state, saveState, onBack }) {
               ) : (
                 <>
                   <button onClick={() => setArmed(false)} className="btn-ghost">Отмена</button>
-                  <button
-                    onClick={resolveRound}
-                    disabled={resolving}
-                    className="bg-[#D1453A] text-white font-bold uppercase tracking-wide text-sm px-6 py-3 rounded-lg flex items-center gap-2 disabled:opacity-50"
-                  >
+                  <button onClick={resolveRound} disabled={resolving} className="bg-[#D1453A] text-white font-bold uppercase tracking-wide text-sm px-6 py-3 rounded-lg flex items-center gap-2 disabled:opacity-50">
                     <Rocket size={16} /> Разрешить раунд
                   </button>
                 </>
@@ -509,7 +581,7 @@ function ScoreTable({ countries }) {
     <Panel className="p-5 mb-6">
       <div className="text-sm uppercase tracking-wide text-[#8A93A0] mb-3">Таблица очков</div>
       <div className="space-y-2">
-        {scored.map((c, i) => (
+        {scored.map((c) => (
           <div key={c.id} className="flex items-center justify-between bg-[#101317] border border-[#2A3138] rounded-lg px-4 py-2.5">
             <span className="font-bold">{c.name}</span>
             <span className="mono font-bold text-[#E8A33D]">{c.score}</span>
@@ -521,10 +593,11 @@ function ScoreTable({ countries }) {
 }
 
 // ============================================================================
-// PLAYER VIEW
+// PLAYER VIEW (с паролем на страну)
 // ============================================================================
 function PlayerView({ state, onBack }) {
   const [countryId, setCountryId] = useState(null);
+  const [unlocked, setUnlocked] = useState(false);
 
   if (!state.started) {
     return (
@@ -544,7 +617,12 @@ function PlayerView({ state, onBack }) {
             <button
               key={c.id}
               disabled={c.eliminated}
-              onClick={() => setCountryId(c.id)}
+              onClick={() => {
+                setCountryId(c.id);
+                let already = false;
+                try { already = sessionStorage.getItem(`mg_country_${c.id}`) === "1"; } catch {}
+                setUnlocked(already);
+              }}
               className="text-left p-5 rounded-xl border border-[#2A3138] bg-[#171B1F] hover:border-[#5FA05B] transition disabled:opacity-30"
             >
               <div className="font-bold uppercase tracking-wide">{c.name}</div>
@@ -555,11 +633,27 @@ function PlayerView({ state, onBack }) {
     );
   }
 
+  const country = state.countries.find((c) => c.id === countryId);
+
+  if (!unlocked) {
+    return (
+      <PasswordGate
+        title={country.name}
+        subtitle="Введите пароль, который вам сообщил ведущий"
+        expectedHash={country.passwordHash}
+        onSuccess={() => setUnlocked(true)}
+        onBack={() => setCountryId(null)}
+        sessionKey={`mg_country_${country.id}`}
+      />
+    );
+  }
+
   return <OrderForm state={state} countryId={countryId} onBack={() => setCountryId(null)} />;
 }
 
 function OrderForm({ state, countryId, onBack }) {
   const country = state.countries.find((c) => c.id === countryId);
+  const existingOrder = useMyOrder(state.round, countryId);
   const [buyTech, setBuyTech] = useState(false);
   const [buyMissiles, setBuyMissiles] = useState(0);
   const [buyShields, setBuyShields] = useState([]);
@@ -567,18 +661,9 @@ function OrderForm({ state, countryId, onBack }) {
   const [launches, setLaunches] = useState([]);
   const [launchTargetCountry, setLaunchTargetCountry] = useState("");
   const [launchTargetCity, setLaunchTargetCity] = useState("");
-  const [submitted, setSubmitted] = useState(false);
-
-  useEffect(() => {
-    const existing = loadOrder(state.round, countryId);
-    if (existing) {
-      setSubmitted(true);
-    } else {
-      setSubmitted(false);
-    }
-  }, [state.round, countryId]);
 
   if (!country) return null;
+  const submitted = !!existingOrder;
 
   const income = countryIncome(country);
   const available = country.gold + income;
@@ -599,15 +684,12 @@ function OrderForm({ state, countryId, onBack }) {
     ? aliveCities(state.countries.find((c) => c.id === launchTargetCountry) || { cities: [] })
     : [];
 
-  const toggleShield = (name) => {
-    setBuyShields((s) => (s.includes(name) ? s.filter((n) => n !== name) : [...s, name]));
-  };
+  const toggleShield = (name) => setBuyShields((s) => (s.includes(name) ? s.filter((n) => n !== name) : [...s, name]));
 
   const addLaunch = () => {
     if (!launchTargetCountry || !launchTargetCity) return;
     const dup = launches.some((l) => l.targetCountryId === launchTargetCountry && l.targetCity === launchTargetCity);
-    if (dup) return;
-    if (launches.length >= totalMissilesAvailable) return;
+    if (dup || launches.length >= totalMissilesAvailable) return;
     setLaunches((l) => [...l, { targetCountryId: launchTargetCountry, targetCity: launchTargetCity }]);
     setLaunchTargetCity("");
   };
@@ -616,7 +698,7 @@ function OrderForm({ state, countryId, onBack }) {
 
   const submit = () => {
     if (overBudget || overLaunches) return;
-    const order = {
+    saveOrder(state.round, countryId, {
       countryId,
       buyTech: buyTech && !country.techResearched,
       buyMissiles: missileEligible ? buyMissiles : 0,
@@ -624,9 +706,7 @@ function OrderForm({ state, countryId, onBack }) {
       buyEcology,
       launches,
       submittedAt: Date.now(),
-    };
-    saveOrder(state.round, countryId, order);
-    setSubmitted(true);
+    });
   };
 
   return (
@@ -651,13 +731,11 @@ function OrderForm({ state, countryId, onBack }) {
         <>
           <Panel className="p-5 mb-6">
             <div className="text-sm uppercase tracking-wide text-[#8A93A0] mb-4">Покупки</div>
-
             <div className="space-y-3">
               <label className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer ${country.techResearched ? "opacity-40" : buyTech ? "border-[#E8A33D]" : "border-[#2A3138]"}`}>
                 <input type="checkbox" disabled={country.techResearched} checked={buyTech} onChange={(e) => setBuyTech(e.target.checked)} />
                 <div className="text-sm">Ядерная технология — {TECH_COST} золота</div>
               </label>
-
               <div className="p-3 rounded-lg border border-[#2A3138]">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm">Ракеты {!missileEligible && "(нет технологии)"}</span>
@@ -665,24 +743,16 @@ function OrderForm({ state, countryId, onBack }) {
                 </div>
                 <div className="text-xs text-[#8A93A0]">{MISSILE_COST} золота за штуку</div>
               </div>
-
               <div className="p-3 rounded-lg border border-[#2A3138]">
                 <div className="text-sm mb-2">Щиты — {SHIELD_COST} золота</div>
                 <div className="flex flex-wrap gap-2">
                   {aliveCities(country).map((ci) => (
-                    <button
-                      key={ci.name}
-                      onClick={() => toggleShield(ci.name)}
-                      className={`text-xs px-3 py-1.5 rounded-full border ${
-                        buyShields.includes(ci.name) ? "border-[#5FA05B] bg-[#5FA05B22]" : "border-[#2A3138]"
-                      }`}
-                    >
+                    <button key={ci.name} onClick={() => toggleShield(ci.name)} className={`text-xs px-3 py-1.5 rounded-full border ${buyShields.includes(ci.name) ? "border-[#5FA05B] bg-[#5FA05B22]" : "border-[#2A3138]"}`}>
                       {ci.name}
                     </button>
                   ))}
                 </div>
               </div>
-
               <div className="p-3 rounded-lg border border-[#2A3138]">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm">Экология (+5% доход за уровень)</span>
@@ -713,7 +783,7 @@ function OrderForm({ state, countryId, onBack }) {
                 return (
                   <div key={i} className="flex items-center justify-between bg-[#101317] border border-[#2A3138] rounded-lg px-3 py-2 text-xs">
                     <span>{tc?.name} — {l.targetCity}</span>
-                    <button onClick={() => removeLaunch(i)} className="text-[#D1453A]"><X size={14}/></button>
+                    <button onClick={() => removeLaunch(i)} className="text-[#D1453A]"><X size={14} /></button>
                   </div>
                 );
               })}
@@ -721,16 +791,8 @@ function OrderForm({ state, countryId, onBack }) {
           </Panel>
 
           <Panel className="p-5 flex items-center justify-between flex-wrap gap-4">
-            <div className="text-sm">
-              <div className={overBudget ? "text-[#D1453A]" : ""}>
-                Стоимость: {cost} / {available} доступно
-              </div>
-            </div>
-            <button
-              onClick={submit}
-              disabled={overBudget || overLaunches}
-              className="bg-[#5FA05B] text-[#0C1A0C] font-bold uppercase tracking-wide text-sm px-6 py-3 rounded-lg flex items-center gap-2 disabled:opacity-30"
-            >
+            <div className={`text-sm ${overBudget ? "text-[#D1453A]" : ""}`}>Стоимость: {cost} / {available} доступно</div>
+            <button onClick={submit} disabled={overBudget || overLaunches} className="bg-[#5FA05B] text-[#0C1A0C] font-bold uppercase tracking-wide text-sm px-6 py-3 rounded-lg flex items-center gap-2 disabled:opacity-30">
               <Check size={16} /> Отправить
             </button>
           </Panel>
@@ -749,3 +811,4 @@ function NumberStepper({ value, setValue, disabled }) {
     </div>
   );
 }
+

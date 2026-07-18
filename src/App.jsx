@@ -111,6 +111,16 @@ function saveOrder(round, countryId, order) {
   fbSet(ref(db, `orders/${round}/${countryId}`), order);
 }
 
+function resetGame() {
+  fbSet(ref(db, "gameState"), null);
+  fbSet(ref(db, "orders"), null);
+  try {
+    Object.keys(sessionStorage).forEach((k) => {
+      if (k.startsWith("mg_")) sessionStorage.removeItem(k);
+    });
+  } catch {}
+}
+
 // ============================================================================
 // ROOT
 // ============================================================================
@@ -129,10 +139,15 @@ export default function App() {
     );
   }
 
+  const fullReset = useCallback(() => {
+    resetGame();
+    setRole(null);
+  }, []);
+
   return (
     <Shell>
       {!role && <RoleSelect onSelect={setRole} />}
-      {role === "gm" && <GmView state={state} saveState={saveState} onBack={() => setRole(null)} />}
+      {role === "gm" && <GmView state={state} saveState={saveState} onBack={() => setRole(null)} onFullReset={fullReset} />}
       {role === "player" && <PlayerView state={state} onBack={() => setRole(null)} />}
     </Shell>
   );
@@ -272,10 +287,50 @@ function RoleSelect({ onSelect }) {
   );
 }
 
+function DangerZone({ onReset }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const canConfirm = text.trim().toUpperCase() === "СТЕРЕТЬ";
+
+  return (
+    <Panel className="p-5 mt-10 border-[#D1453A]">
+      <div className="flex items-center gap-2 text-[#D1453A] font-bold uppercase mb-2 text-sm">
+        <AlertTriangle size={16} /> Опасная зона
+      </div>
+      <p className="text-xs text-[#8A93A0] mb-4">
+        Полностью завершает игру и безвозвратно удаляет все данные: пароли, страны, ресурсы и все приказы.
+        Все участники увидят чистую, ещё не созданную игру.
+      </p>
+      {!open ? (
+        <button onClick={() => setOpen(true)} className="btn-ghost border-[#D1453A] text-[#D1453A]">
+          <Trash2 size={14} className="inline mr-1.5 -mt-0.5" /> Завершить игру и очистить все данные
+        </button>
+      ) : (
+        <div className="space-y-3 max-w-sm">
+          <p className="text-xs">
+            Чтобы подтвердить, введите слово <b className="text-[#D1453A]">СТЕРЕТЬ</b>
+          </p>
+          <input value={text} onChange={(e) => setText(e.target.value)} className="input" placeholder="СТЕРЕТЬ" />
+          <div className="flex gap-2">
+            <button onClick={() => { setOpen(false); setText(""); }} className="btn-ghost">Отмена</button>
+            <button
+              disabled={!canConfirm}
+              onClick={onReset}
+              className="bg-[#D1453A] text-white font-bold uppercase tracking-wide text-xs px-4 py-2.5 rounded-lg disabled:opacity-30"
+            >
+              Подтвердить удаление
+            </button>
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 // ============================================================================
 // GM VIEW (с паролем на комнату)
 // ============================================================================
-function GmView({ state, saveState, onBack }) {
+function GmView({ state, saveState, onBack, onFullReset }) {
   const alreadyUnlocked = useUnlocked("mg_gm_unlocked");
   const [unlocked, setUnlocked] = useState(alreadyUnlocked);
 
@@ -297,9 +352,9 @@ function GmView({ state, saveState, onBack }) {
   }
 
   if (!state.started) {
-    return <GmSetup state={state} saveState={saveState} onBack={onBack} />;
+    return <GmSetup state={state} saveState={saveState} onBack={onBack} onFullReset={onFullReset} />;
   }
-  return <GmDashboard state={state} saveState={saveState} onBack={onBack} />;
+  return <GmDashboard state={state} saveState={saveState} onBack={onBack} onFullReset={onFullReset} />;
 }
 
 function GmCreateRoom({ saveState, onBack }) {
@@ -331,7 +386,7 @@ function GmCreateRoom({ saveState, onBack }) {
   );
 }
 
-function GmSetup({ state, saveState, onBack }) {
+function GmSetup({ state, saveState, onBack, onFullReset }) {
   const [name, setName] = useState("");
   const [capital, setCapital] = useState("");
   const [c2, setC2] = useState("");
@@ -402,11 +457,13 @@ function GmSetup({ state, saveState, onBack }) {
         Начать игру ({state.countries.length} стран) <ChevronRight size={18} />
       </button>
       {state.countries.length < 2 && <p className="text-center text-xs text-[#8A93A0] mt-2">Добавьте минимум 2 страны</p>}
+
+      <DangerZone onReset={onFullReset} />
     </div>
   );
 }
 
-function GmDashboard({ state, saveState, onBack }) {
+function GmDashboard({ state, saveState, onBack, onFullReset }) {
   const orders = useRoundOrders(state.round);
   const [armed, setArmed] = useState(false);
   const [resolving, setResolving] = useState(false);
@@ -564,6 +621,8 @@ function GmDashboard({ state, saveState, onBack }) {
         <Trophy size={14} /> {showScores ? "Скрыть" : "Показать"} очки
       </button>
       {showScores && <ScoreTable countries={state.countries} />}
+
+      <DangerZone onReset={onFullReset} />
     </div>
   );
 }
@@ -811,4 +870,5 @@ function NumberStepper({ value, setValue, disabled }) {
     </div>
   );
 }
+
 

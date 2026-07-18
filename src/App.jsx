@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
-  Rocket, ShieldCheck, Atom, Sprout, Crown, Target, Check, X, RefreshCw,
-  AlertTriangle, Trophy, Radio, Plus, Trash2, ChevronRight, Landmark, Loader2, Eye
+  Rocket, Target, Check, X,
+  AlertTriangle, Trophy, Radio, Plus, Trash2, ChevronRight, Landmark
 } from "lucide-react";
 
 const TECH_COST = 70;
@@ -583,7 +583,6 @@ function OrderForm({ state, countryId, onBack }) {
   const income = countryIncome(country);
   const available = country.gold + income;
   const missileEligible = canBuildMissiles(country, state.round);
-  const unshieldedCities = aliveCities(country).filter((c) => !c.shielded);
   const totalMissilesAvailable = country.missiles + (missileEligible ? buyMissiles : 0);
 
   const cost =

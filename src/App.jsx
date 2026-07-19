@@ -80,7 +80,7 @@ function canBuildMissiles(country, round) {
   return country.techResearched && country.techReadyRound !== null && round >= country.techReadyRound;
 }
 
-const emptyState = { round: 1, countries: [], log: [], started: false, ended: false, gmPasswordHash: null };
+const emptyState = { round: 1, countries: [], log: [], attackLog: [], started: false, ended: false, gmPasswordHash: null };
 
 // ============================================================================
 // FIREBASE-BACKED STATE (real-time, синхронно на всех устройствах)
@@ -102,6 +102,7 @@ function useGameState() {
                 ...val,
                 countries: Array.isArray(val.countries) ? val.countries : [],
                 log: Array.isArray(val.log) ? val.log : [],
+                attackLog: Array.isArray(val.attackLog) ? val.attackLog : [],
               }
             : emptyState
         );
@@ -543,6 +544,7 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
   const [armed, setArmed] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [showScores, setShowScores] = useState(false);
+  const [showAttacks, setShowAttacks] = useState(false);
 
   const activeCountries = state.countries.filter((c) => !c.eliminated);
   const submittedCount = Object.keys(orders).length;
@@ -627,21 +629,47 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
         if (c.missiles > 0) { c.missiles -= 1; flatLaunches.push({ attackerId: c.id, ...l }); }
       }
     }
+    const roundAttacks = [];
     for (const l of flatLaunches) {
       const attacker = countries.find((c) => c.id === l.attackerId);
       const attackerName = attacker ? attacker.name : "?";
       const target = countries.find((c) => c.id === l.targetCountryId);
       if (!target || target.eliminated) {
         log.push(`💨 Ракета ${attackerName} → ${l.targetCity}: страна-цель уже выбыла, ракета потрачена впустую`);
+        roundAttacks.push({
+          round, attackerId: l.attackerId, attackerName,
+          targetCountryId: l.targetCountryId, targetName: target ? target.name : "?",
+          targetCity: l.targetCity, outcome: "wasted_eliminated",
+        });
         continue;
       }
       const city = target.cities.find((ci) => ci.name === l.targetCity);
       if (!city || !city.alive) {
         log.push(`💨 Ракета ${attackerName} → город ${l.targetCity} (${target.name}) уже был уничтожен ранее в этом раунде — ракета потрачена впустую`);
+        roundAttacks.push({
+          round, attackerId: l.attackerId, attackerName,
+          targetCountryId: l.targetCountryId, targetName: target.name,
+          targetCity: l.targetCity, outcome: "wasted_destroyed",
+        });
         continue;
       }
-      if (city.shielded) { city.shielded = false; log.push(`🛡️💥 Ракета ${attackerName} → щит города ${city.name} (${target.name}) сбит`); }
-      else { city.alive = false; log.push(`💥 Ракета ${attackerName} → город ${city.name} (${target.name}) уничтожен!`); }
+      if (city.shielded) {
+        city.shielded = false;
+        log.push(`🛡️💥 Ракета ${attackerName} → щит города ${city.name} (${target.name}) сбит`);
+        roundAttacks.push({
+          round, attackerId: l.attackerId, attackerName,
+          targetCountryId: l.targetCountryId, targetName: target.name,
+          targetCity: l.targetCity, outcome: "shield_broken",
+        });
+      } else {
+        city.alive = false;
+        log.push(`💥 Ракета ${attackerName} → город ${city.name} (${target.name}) уничтожен!`);
+        roundAttacks.push({
+          round, attackerId: l.attackerId, attackerName,
+          targetCountryId: l.targetCountryId, targetName: target.name,
+          targetCity: l.targetCity, outcome: "destroyed",
+        });
+      }
     }
 
     for (const c of countries) {
@@ -670,7 +698,14 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
       ended = true;
     }
 
-    saveState({ ...state, countries, round: round + 1, log: [...state.log, ...log.map((text) => ({ round, text }))], ended });
+    saveState({
+      ...state,
+      countries,
+      round: round + 1,
+      log: [...state.log, ...log.map((text) => ({ round, text }))],
+      attackLog: [...(state.attackLog || []), ...roundAttacks],
+      ended,
+    });
     setResolving(false);
     setArmed(false);
   };
@@ -757,10 +792,16 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
         </Panel>
       )}
 
-      <button onClick={() => setShowScores((s) => !s)} className="btn-ghost mb-4 flex items-center gap-2">
-        <Trophy size={14} /> {showScores ? "Скрыть" : "Показать"} очки
-      </button>
+      <div className="flex flex-wrap gap-3 mb-4">
+        <button onClick={() => setShowScores((s) => !s)} className="btn-ghost flex items-center gap-2">
+          <Trophy size={14} /> {showScores ? "Скрыть" : "Показать"} очки
+        </button>
+        <button onClick={() => setShowAttacks((s) => !s)} className="btn-ghost flex items-center gap-2">
+          <Rocket size={14} /> {showAttacks ? "Скрыть" : "Показать"} сводку ударов
+        </button>
+      </div>
       {showScores && <ScoreTable countries={state.countries} />}
+      {showAttacks && <AttackSummary attackLog={state.attackLog} />}
 
       <DangerZone onReset={onFullReset} />
     </div>
@@ -779,6 +820,54 @@ function ScoreTable({ countries }) {
           <div key={c.id} className="flex items-center justify-between bg-[#101317] border border-[#2A3138] rounded-lg px-4 py-2.5">
             <span className="font-bold">{c.name}</span>
             <span className="mono font-bold text-[#E8A33D]">{c.score}</span>
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
+const ATTACK_OUTCOME_LABEL = {
+  destroyed: { text: "город уничтожен", cls: "text-[#D1453A]", icon: "💥" },
+  shield_broken: { text: "щит сбит, город устоял", cls: "text-[#5FA05B]", icon: "🛡️💥" },
+  wasted_destroyed: { text: "город уже был уничтожен — впустую", cls: "text-[#8A93A0]", icon: "💨" },
+  wasted_eliminated: { text: "страна уже выбыла — впустую", cls: "text-[#8A93A0]", icon: "💨" },
+};
+
+function AttackSummary({ attackLog }) {
+  if (!attackLog || attackLog.length === 0) {
+    return (
+      <Panel className="p-5 mb-6">
+        <div className="text-sm uppercase tracking-wide text-[#8A93A0] mb-2">Сводка ударов</div>
+        <p className="text-sm text-[#8A93A0]">За всю игру ни одна ракета не была запущена.</p>
+      </Panel>
+    );
+  }
+  const byRound = {};
+  for (const a of attackLog) {
+    (byRound[a.round] = byRound[a.round] || []).push(a);
+  }
+  const rounds = Object.keys(byRound).map(Number).sort((a, b) => a - b);
+  return (
+    <Panel className="p-5 mb-6">
+      <div className="text-sm uppercase tracking-wide text-[#8A93A0] mb-3">Сводка ударов — кто по кому стрелял</div>
+      <div className="space-y-4">
+        {rounds.map((r) => (
+          <div key={r}>
+            <div className="text-xs uppercase tracking-wide text-[#8A93A0] mb-2">Раунд {r}</div>
+            <div className="space-y-1.5">
+              {byRound[r].map((a, i) => {
+                const o = ATTACK_OUTCOME_LABEL[a.outcome] || { text: a.outcome, cls: "", icon: "•" };
+                return (
+                  <div key={i} className="flex items-center justify-between bg-[#101317] border border-[#2A3138] rounded-lg px-3 py-2 text-xs">
+                    <span>
+                      <b>{a.attackerName}</b> → {a.targetName} · {a.targetCity}
+                    </span>
+                    <span className={`mono ${o.cls}`}>{o.icon} {o.text}</span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         ))}
       </div>
@@ -857,17 +946,54 @@ function OrderForm({ state, countryId, onBack }) {
   const [launchTargetCountry, setLaunchTargetCountry] = useState("");
   const [launchTargetCity, setLaunchTargetCity] = useState("");
 
+  // Новый раунд — черновик приказа всегда начинается с чистого листа
+  // (в т.ч. при обычной перезагрузке страницы, т.к. это useState без persist)
+  useEffect(() => {
+    setBuyTech(false);
+    setBuyMissiles(0);
+    setBuyShields([]);
+    setBuyEcology(0);
+    setBuyLevelUps([]);
+    setLaunches([]);
+    setLaunchTargetCountry("");
+    setLaunchTargetCity("");
+  }, [state.round, countryId]);
+
+  // Защита: если цель ракеты (город/страна) стала недействительной
+  // (город уничтожен, страна выбыла) — убираем такой пуск из черновика
+  useEffect(() => {
+    setLaunches((ls) =>
+      ls.filter((l) => {
+        const tc = state.countries.find((c) => c.id === l.targetCountryId);
+        if (!tc || tc.eliminated) return false;
+        const city = tc.cities.find((ci) => ci.name === l.targetCity);
+        return !!(city && city.alive);
+      })
+    );
+  }, [state.countries]);
+
   if (!country) return null;
 
   if (state.ended) {
+    const remaining = state.countries.filter((c) => !c.eliminated);
+    const nuclearWinner = remaining.length === 1 && state.countries.length > 1 ? remaining[0] : null;
+    const ranked = remaining.map((c) => ({ ...c, score: countryScore(c) })).sort((a, b) => b.score - a.score);
+    const winner = nuclearWinner || ranked[0] || null;
     return (
       <div>
         <Header title={country.name} subtitle="Игра окончена" onBack={onBack} />
         <Panel className="p-6 mb-6 border-[#E8A33D] text-center">
           <Trophy className="mx-auto text-[#E8A33D] mb-2" size={28} />
           <div className="font-bold uppercase tracking-wide">Игра завершена</div>
-          <p className="text-[#8A93A0] text-sm mt-2">Приказы больше не принимаются. Результаты уточните у ведущего.</p>
+          {winner && (
+            <p className="text-sm mt-2">
+              Победитель: <b>{winner.name}</b>
+              {nuclearWinner ? " (ядерная победа)" : ` (по очкам: ${winner.score})`}
+            </p>
+          )}
         </Panel>
+        <ScoreTable countries={state.countries} />
+        <AttackSummary attackLog={state.attackLog} />
       </div>
     );
   }

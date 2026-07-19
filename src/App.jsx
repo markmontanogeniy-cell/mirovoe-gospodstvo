@@ -71,7 +71,16 @@ function useGameState() {
       stateRef,
       (snap) => {
         const val = snap.val();
-        setState(val || emptyState);
+        setState(
+          val
+            ? {
+                ...emptyState,
+                ...val,
+                countries: Array.isArray(val.countries) ? val.countries : [],
+                log: Array.isArray(val.log) ? val.log : [],
+              }
+            : emptyState
+        );
         setLoaded(true);
       },
       () => setLoaded(true)
@@ -912,4 +921,3 @@ function NumberStepper({ value, setValue, disabled }) {
     </div>
   );
 }
-

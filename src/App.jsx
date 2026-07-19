@@ -6,13 +6,19 @@ import {
 import { db, ref, onValue, set as fbSet } from "./firebase";
 
 const TECH_COST = 70;
-const MISSILE_COST = 30;
+const TECH_INCOME_PENALTY = 0.03; // разовый штраф -3% к доходу после получения ядерных технологий
+const MISSILE_COST = 25;
+const MISSILE_INCOME_PENALTY = 0.03; // -3% к доходу за КАЖДУЮ когда-либо построенную ракету (накопительно, навсегда)
+const MAX_MISSILES_BUILT = 7; // жёсткий потолок на ракеты за всю игру (на страну)
 const SHIELD_COST = 30;
-const ECOLOGY_COST = 25;
-const ECOLOGY_BONUS = 0.05;
-const CAPITAL_INCOME = 10;
-const CITY_INCOME = 5;
+const ECOLOGY_COST = 8;
+const ECOLOGY_BONUS = 0.01; // +1% к доходу за уровень экологии
 const START_GOLD = 100;
+
+// Уровни городов: индекс 0 = уровень 1
+const CITY_LEVEL_INCOME = [6, 9, 12];
+const LEVEL_UP_COST = { 2: 20, 3: 30 }; // цена апгрейда ДО уровня 2 / ДО уровня 3
+const MAX_CITY_LEVEL = 3;
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -31,21 +37,29 @@ function freshCountry(name, capitalName, cityNames, passwordHash) {
     techResearched: false,
     techReadyRound: null,
     missiles: 0,
+    missilesBuilt: 0,
     ecologyLevel: 0,
     eliminated: false,
     cities: [
-      { name: capitalName, capital: true, alive: true, shielded: false },
-      ...cityNames.map((n) => ({ name: n, capital: false, alive: true, shielded: false })),
+      { name: capitalName, capital: true, alive: true, shielded: false, level: 1 },
+      ...cityNames.map((n) => ({ name: n, capital: false, alive: true, shielded: false, level: 1 })),
     ],
   };
 }
 
 function countryIncome(country) {
   const base = country.cities.reduce(
-    (sum, c) => (c.alive ? sum + (c.capital ? CAPITAL_INCOME : CITY_INCOME) : sum),
+    (sum, c) => (c.alive ? sum + CITY_LEVEL_INCOME[(c.level || 1) - 1] : sum),
     0
   );
-  return Math.round(base * (1 + ECOLOGY_BONUS * country.ecologyLevel));
+  const multiplier = Math.max(
+    0,
+    1 +
+      ECOLOGY_BONUS * country.ecologyLevel -
+      MISSILE_INCOME_PENALTY * (country.missilesBuilt || 0) -
+      (country.techResearched ? TECH_INCOME_PENALTY : 0)
+  );
+  return Math.round(base * multiplier);
 }
 
 function aliveCities(country) {
@@ -536,6 +550,8 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
       log.push(`💰 ${c.name}: доход ${income} золота (казна: ${c.gold})`);
     }
 
+    const newlyBuiltMissiles = {}; // ракеты, построенные в этом раунде — станут боеготовыми только со следующего раунда
+
     for (const c of countries) {
       if (c.eliminated) continue;
       const order = orders[c.id];
@@ -543,7 +559,8 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
       let spend = 0;
       if (order.buyTech && !c.techResearched) spend += TECH_COST;
       const missileEligible = canBuildMissiles(c, round);
-      const missileQty = missileEligible ? order.buyMissiles || 0 : 0;
+      const missilesRemaining = Math.max(0, MAX_MISSILES_BUILT - (c.missilesBuilt || 0));
+      const missileQty = missileEligible ? Math.min(order.buyMissiles || 0, missilesRemaining) : 0;
       spend += missileQty * MISSILE_COST;
       const validShields = (order.buyShields || []).filter((name) => {
         const city = c.cities.find((ci) => ci.name === name);
@@ -552,20 +569,39 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
       spend += validShields.length * SHIELD_COST;
       const ecoQty = order.buyEcology || 0;
       spend += ecoQty * ECOLOGY_COST;
+      const validLevelUps = (order.buyLevelUps || []).filter((name) => {
+        const city = c.cities.find((ci) => ci.name === name);
+        return city && city.alive && (city.level || 1) < MAX_CITY_LEVEL;
+      });
+      const levelUpCost = validLevelUps.reduce((sum, name) => {
+        const city = c.cities.find((ci) => ci.name === name);
+        const nextLevel = (city.level || 1) + 1;
+        return sum + (LEVEL_UP_COST[nextLevel] || 0);
+      }, 0);
+      spend += levelUpCost;
 
       if (spend > c.gold) { log.push(`⚠️ ${c.name}: приказ превышал бюджет`); continue; }
       c.gold -= spend;
       if (order.buyTech && !c.techResearched) {
         c.techResearched = true;
         c.techReadyRound = round + 1;
-        log.push(`⚛️ ${c.name} запускает ядерную программу`);
+        log.push(`⚛️ ${c.name} запускает ядерную программу (-3% к доходу навсегда)`);
       }
-      if (missileQty > 0) { c.missiles += missileQty; log.push(`🚀 ${c.name} строит ракеты: +${missileQty}`); }
+      if (missileQty > 0) {
+        newlyBuiltMissiles[c.id] = (newlyBuiltMissiles[c.id] || 0) + missileQty;
+        c.missilesBuilt = (c.missilesBuilt || 0) + missileQty;
+        log.push(`🚀 ${c.name} строит ракеты: +${missileQty} (будут готовы к пуску в раунде ${round + 1}; доход -3% за каждую)`);
+      }
       for (const name of validShields) {
         const city = c.cities.find((ci) => ci.name === name);
         city.shielded = true;
       }
-      if (ecoQty > 0) { c.ecologyLevel += ecoQty; log.push(`🌱 ${c.name} экология: +${ecoQty}`); }
+      if (ecoQty > 0) { c.ecologyLevel += ecoQty; log.push(`🌱 ${c.name} экология: +${ecoQty} (+${ecoQty * 1}% дохода)`); }
+      for (const name of validLevelUps) {
+        const city = c.cities.find((ci) => ci.name === name);
+        city.level = (city.level || 1) + 1;
+        log.push(`🏙️ ${c.name}: город ${city.name} прокачан до уровня ${city.level}`);
+      }
     }
 
     const flatLaunches = [];
@@ -591,6 +627,13 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
 
     for (const c of countries) {
       if (!c.eliminated && c.cities.every((ci) => !ci.alive)) { c.eliminated = true; log.push(`☠️ ${c.name} выбывает из игры!`); }
+    }
+
+    // Ракеты, построенные в этом раунде, пополняют боеготовый запас только теперь —
+    // они не могли участвовать в пусках этого раунда и станут доступны для запуска со следующего раунда
+    for (const c of countries) {
+      const qty = newlyBuiltMissiles[c.id];
+      if (qty) c.missiles += qty;
     }
 
     const remaining = countries.filter((c) => !c.eliminated);
@@ -637,7 +680,7 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
                     !ci.alive ? "border-[#D1453A] text-[#D1453A] line-through" :
                     ci.shielded ? "border-[#5FA05B] text-[#5FA05B]" : "border-[#2A3138] text-[#ECEEEF]"
                   }`}>
-                    {ci.capital ? "★" : ""}{ci.name}
+                    {ci.capital ? "★" : ""}{ci.name} · Ур.{ci.level || 1}
                   </span>
                 ))}
               </div>
@@ -681,9 +724,11 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
 function ScoreTable({ countries }) {
   const scored = countries
     .map((c) => {
-      const normalAlive = c.cities.filter((ci) => ci.alive && !ci.capital).length;
-      const capitalAlive = c.cities.some((ci) => ci.alive && ci.capital);
-      const score = c.gold + normalAlive * 15 + (capitalAlive ? 30 : 0) + c.missiles * 5;
+      const cityValue = c.cities.reduce(
+        (sum, ci) => (ci.alive ? sum + CITY_LEVEL_INCOME[(ci.level || 1) - 1] * 3 : sum),
+        0
+      );
+      const score = c.gold + cityValue + c.missiles * 5;
       return { ...c, score };
     })
     .sort((a, b) => b.score - a.score);
@@ -768,6 +813,7 @@ function OrderForm({ state, countryId, onBack }) {
   const [buyMissiles, setBuyMissiles] = useState(0);
   const [buyShields, setBuyShields] = useState([]);
   const [buyEcology, setBuyEcology] = useState(0);
+  const [buyLevelUps, setBuyLevelUps] = useState([]);
   const [launches, setLaunches] = useState([]);
   const [launchTargetCountry, setLaunchTargetCountry] = useState("");
   const [launchTargetCity, setLaunchTargetCity] = useState("");
@@ -778,13 +824,22 @@ function OrderForm({ state, countryId, onBack }) {
   const income = countryIncome(country);
   const available = country.gold + income;
   const missileEligible = canBuildMissiles(country, state.round);
-  const totalMissilesAvailable = country.missiles + (missileEligible ? buyMissiles : 0);
+  const missilesRemaining = Math.max(0, MAX_MISSILES_BUILT - (country.missilesBuilt || 0));
+  const totalMissilesAvailable = country.missiles; // ракеты, купленные в этом приказе, будут готовы только со следующего раунда
+
+  const levelUpCost = buyLevelUps.reduce((sum, name) => {
+    const city = country.cities.find((ci) => ci.name === name);
+    if (!city) return sum;
+    const nextLevel = (city.level || 1) + 1;
+    return sum + (LEVEL_UP_COST[nextLevel] || 0);
+  }, 0);
 
   const cost =
     (buyTech && !country.techResearched ? TECH_COST : 0) +
     (missileEligible ? buyMissiles * MISSILE_COST : 0) +
     buyShields.length * SHIELD_COST +
-    buyEcology * ECOLOGY_COST;
+    buyEcology * ECOLOGY_COST +
+    levelUpCost;
 
   const overBudget = cost > available;
   const overLaunches = launches.length > totalMissilesAvailable;
@@ -795,6 +850,7 @@ function OrderForm({ state, countryId, onBack }) {
     : [];
 
   const toggleShield = (name) => setBuyShields((s) => (s.includes(name) ? s.filter((n) => n !== name) : [...s, name]));
+  const toggleLevelUp = (name) => setBuyLevelUps((s) => (s.includes(name) ? s.filter((n) => n !== name) : [...s, name]));
 
   const addLaunch = () => {
     if (!launchTargetCountry || !launchTargetCity) return;
@@ -814,6 +870,7 @@ function OrderForm({ state, countryId, onBack }) {
       buyMissiles: missileEligible ? buyMissiles : 0,
       buyShields,
       buyEcology,
+      buyLevelUps,
       launches,
       submittedAt: Date.now(),
     });
@@ -828,7 +885,11 @@ function OrderForm({ state, countryId, onBack }) {
           <div><div className="text-[#8A93A0] text-xs uppercase mb-1">Казна</div>{country.gold}</div>
           <div><div className="text-[#8A93A0] text-xs uppercase mb-1">+ доход</div>+{income}</div>
           <div><div className="text-[#8A93A0] text-xs uppercase mb-1">Ракеты</div>{country.missiles}</div>
-          <div><div className="text-[#8A93A0] text-xs uppercase mb-1">Экология</div>+{country.ecologyLevel * 5}%</div>
+          <div><div className="text-[#8A93A0] text-xs uppercase mb-1">Экология</div>+{country.ecologyLevel * 1}%</div>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mono text-xs mt-3 pt-3 border-t border-[#2A3138] text-[#8A93A0]">
+          <div>Построено ракет: {country.missilesBuilt || 0} / {MAX_MISSILES_BUILT} (-{(country.missilesBuilt || 0) * 3}% дохода)</div>
+          {country.techResearched && <div>Ядер. технологии: есть (-3% дохода)</div>}
         </div>
       </Panel>
 
@@ -844,14 +905,16 @@ function OrderForm({ state, countryId, onBack }) {
             <div className="space-y-3">
               <label className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer ${country.techResearched ? "opacity-40" : buyTech ? "border-[#E8A33D]" : "border-[#2A3138]"}`}>
                 <input type="checkbox" disabled={country.techResearched} checked={buyTech} onChange={(e) => setBuyTech(e.target.checked)} />
-                <div className="text-sm">Ядерная технология — {TECH_COST} золота</div>
+                <div className="text-sm">Ядерная технология — {TECH_COST} золота <span className="text-[#8A93A0]">(разово -3% к доходу навсегда)</span></div>
               </label>
               <div className="p-3 rounded-lg border border-[#2A3138]">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm">Ракеты {!missileEligible && "(нет технологии)"}</span>
-                  <NumberStepper value={buyMissiles} setValue={setBuyMissiles} disabled={!missileEligible} />
+                  <NumberStepper value={buyMissiles} setValue={setBuyMissiles} disabled={!missileEligible} max={missilesRemaining} />
                 </div>
-                <div className="text-xs text-[#8A93A0]">{MISSILE_COST} золота за штуку</div>
+                <div className="text-xs text-[#8A93A0]">
+                  {MISSILE_COST} золота за штуку · готовы к пуску со следующего раунда · каждая построенная ракета -3% к доходу навсегда · лимит {MAX_MISSILES_BUILT} за игру (осталось {missilesRemaining})
+                </div>
               </div>
               <div className="p-3 rounded-lg border border-[#2A3138]">
                 <div className="text-sm mb-2">Щиты — {SHIELD_COST} золота</div>
@@ -865,17 +928,43 @@ function OrderForm({ state, countryId, onBack }) {
               </div>
               <div className="p-3 rounded-lg border border-[#2A3138]">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm">Экология (+5% доход за уровень)</span>
+                  <span className="text-sm">Экология (+1% доход за уровень)</span>
                   <NumberStepper value={buyEcology} setValue={setBuyEcology} />
                 </div>
                 <div className="text-xs text-[#8A93A0]">{ECOLOGY_COST} золота за уровень</div>
+              </div>
+              <div className="p-3 rounded-lg border border-[#2A3138]">
+                <div className="text-sm mb-2">Прокачать город</div>
+                <div className="flex flex-wrap gap-2">
+                  {aliveCities(country).map((ci) => {
+                    const level = ci.level || 1;
+                    const maxed = level >= MAX_CITY_LEVEL;
+                    const nextCost = LEVEL_UP_COST[level + 1];
+                    return (
+                      <button
+                        key={ci.name}
+                        disabled={maxed}
+                        onClick={() => toggleLevelUp(ci.name)}
+                        className={`text-xs px-3 py-1.5 rounded-full border disabled:opacity-30 ${buyLevelUps.includes(ci.name) ? "border-[#E8A33D] bg-[#E8A33D22]" : "border-[#2A3138]"}`}
+                      >
+                        {ci.name} · Ур.{level}{maxed ? " (макс)" : ` → ${level + 1} за ${nextCost}`}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="text-xs text-[#8A93A0] mt-2">Доход по уровню: Ур.1 — {CITY_LEVEL_INCOME[0]}, Ур.2 — {CITY_LEVEL_INCOME[1]}, Ур.3 — {CITY_LEVEL_INCOME[2]}</div>
               </div>
             </div>
           </Panel>
 
           <Panel className="p-5 mb-6">
             <div className="text-sm uppercase tracking-wide text-[#8A93A0] mb-3">Пуск ракет</div>
-            <p className="text-xs text-[#8A93A0] mb-3">Доступно: {totalMissilesAvailable} ракет</p>
+            <p className="text-xs text-[#8A93A0] mb-3">
+              Готово к пуску: {totalMissilesAvailable} ракет
+              {missileEligible && buyMissiles > 0 && (
+                <> · строится в этом приказе: {buyMissiles} (будут готовы в раунде {state.round + 1}, в этом раунде их нельзя использовать)</>
+              )}
+            </p>
             <div className="flex flex-wrap gap-2 mb-3">
               <select value={launchTargetCountry} onChange={(e) => { setLaunchTargetCountry(e.target.value); setLaunchTargetCity(""); }} className="select">
                 <option value="">Страна…</option>
@@ -912,12 +1001,13 @@ function OrderForm({ state, countryId, onBack }) {
   );
 }
 
-function NumberStepper({ value, setValue, disabled }) {
+function NumberStepper({ value, setValue, disabled, max }) {
+  const atMax = typeof max === "number" && value >= max;
   return (
     <div className="flex items-center gap-2">
       <button disabled={disabled} onClick={() => setValue(Math.max(0, value - 1))} className="w-7 h-7 border border-[#2A3138] rounded text-sm disabled:opacity-30">−</button>
       <span className="w-4 text-center text-sm">{value}</span>
-      <button disabled={disabled} onClick={() => setValue(value + 1)} className="w-7 h-7 border border-[#2A3138] rounded text-sm disabled:opacity-30">+</button>
+      <button disabled={disabled || atMax} onClick={() => setValue(typeof max === "number" ? Math.min(max, value + 1) : value + 1)} className="w-7 h-7 border border-[#2A3138] rounded text-sm disabled:opacity-30">+</button>
     </div>
   );
 }

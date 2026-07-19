@@ -5,20 +5,21 @@ import {
 } from "lucide-react";
 import { db, ref, onValue, set as fbSet } from "./firebase";
 
-const TECH_COST = 70;
+const TECH_COST = 500;
 const TECH_INCOME_PENALTY = 0.03; // разовый штраф -3% к доходу после получения ядерных технологий
-const MISSILE_COST = 25;
+const MISSILE_COST = 350;
 const MISSILE_INCOME_PENALTY = 0.03; // -3% к доходу за КАЖДУЮ когда-либо построенную ракету (накопительно, навсегда)
 const MAX_MISSILES_BUILT = 7; // жёсткий потолок на ракеты за всю игру (на страну)
-const SHIELD_COST = 30;
-const ECOLOGY_COST = 8;
+const SHIELD_COST = 300;
+const ECOLOGY_COST = 50;
 const ECOLOGY_BONUS = 0.01; // +1% к доходу за уровень экологии
-const START_GOLD = 100;
+const START_GOLD = 1000;
 
 // Уровни городов: индекс 0 = уровень 1
-const CITY_LEVEL_INCOME = [6, 9, 12];
-const LEVEL_UP_COST = { 2: 20, 3: 30 }; // цена апгрейда ДО уровня 2 / ДО уровня 3
+const CITY_LEVEL_INCOME = [100, 150, 200];
+const LEVEL_UP_COST = { 2: 50, 3: 75 }; // цена апгрейда ДО уровня 2 / ДО уровня 3
 const MAX_CITY_LEVEL = 3;
+const MAX_ECOLOGY_LEVEL = 10; // потолок суммарного бонуса экологии: +10% (10 уровней)
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -567,7 +568,8 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
         return city && city.alive && !city.shielded;
       });
       spend += validShields.length * SHIELD_COST;
-      const ecoQty = order.buyEcology || 0;
+      const ecoRemaining = Math.max(0, MAX_ECOLOGY_LEVEL - (c.ecologyLevel || 0));
+      const ecoQty = Math.min(order.buyEcology || 0, ecoRemaining);
       spend += ecoQty * ECOLOGY_COST;
       const validLevelUps = (order.buyLevelUps || []).filter((name) => {
         const city = c.cities.find((ci) => ci.name === name);
@@ -826,6 +828,7 @@ function OrderForm({ state, countryId, onBack }) {
   const missileEligible = canBuildMissiles(country, state.round);
   const missilesRemaining = Math.max(0, MAX_MISSILES_BUILT - (country.missilesBuilt || 0));
   const totalMissilesAvailable = country.missiles; // ракеты, купленные в этом приказе, будут готовы только со следующего раунда
+  const ecoRemaining = Math.max(0, MAX_ECOLOGY_LEVEL - (country.ecologyLevel || 0));
 
   const levelUpCost = buyLevelUps.reduce((sum, name) => {
     const city = country.cities.find((ci) => ci.name === name);
@@ -929,9 +932,9 @@ function OrderForm({ state, countryId, onBack }) {
               <div className="p-3 rounded-lg border border-[#2A3138]">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm">Экология (+1% доход за уровень)</span>
-                  <NumberStepper value={buyEcology} setValue={setBuyEcology} />
+                  <NumberStepper value={buyEcology} setValue={setBuyEcology} max={ecoRemaining} />
                 </div>
-                <div className="text-xs text-[#8A93A0]">{ECOLOGY_COST} золота за уровень</div>
+                <div className="text-xs text-[#8A93A0]">{ECOLOGY_COST} золота за уровень · максимум {MAX_ECOLOGY_LEVEL}% за игру (осталось {ecoRemaining})</div>
               </div>
               <div className="p-3 rounded-lg border border-[#2A3138]">
                 <div className="text-sm mb-2">Прокачать город</div>

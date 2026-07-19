@@ -128,6 +128,11 @@ export default function App() {
   const [role, setRole] = useState(null);
   const [state, saveState, loaded] = useGameState();
 
+  const fullReset = useCallback(() => {
+    resetGame();
+    setRole(null);
+  }, []);
+
   if (!loaded) {
     return (
       <Shell>
@@ -138,11 +143,6 @@ export default function App() {
       </Shell>
     );
   }
-
-  const fullReset = useCallback(() => {
-    resetGame();
-    setRole(null);
-  }, []);
 
   return (
     <Shell>

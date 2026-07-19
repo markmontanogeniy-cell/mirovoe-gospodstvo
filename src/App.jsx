@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   Rocket, Target, Check, X, AlertTriangle, Trophy, Radio, Plus, Trash2,
-  ChevronRight, Landmark, Lock, Loader2, LayoutGrid, ShieldCheck,
+  ChevronRight, Landmark, Lock, Loader2, LayoutGrid,
 } from "lucide-react";
 import { db, ref, onValue, set as fbSet } from "./firebase";
 
@@ -940,10 +940,6 @@ function BoardView({ state, onBack }) {
                     <span className="mt-1 text-[11px] font-bold uppercase tracking-wide">
                       {!ci.alive ? (
                         <span className="text-[#C6482E]">уничтожен</span>
-                      ) : ci.shielded ? (
-                        <span className="text-[#2FA85A] flex items-center gap-1">
-                          <ShieldCheck size={13} /> под щитом
-                        </span>
                       ) : (
                         <span className="text-[#8A93A0]">Ур.{ci.level || 1}</span>
                       )}

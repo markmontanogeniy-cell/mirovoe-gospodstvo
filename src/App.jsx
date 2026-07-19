@@ -7,9 +7,9 @@ import { db, ref, onValue, set as fbSet } from "./firebase";
 
 const TECH_COST = 500;
 const TECH_INCOME_PENALTY = 0.03; // разовый штраф -3% к доходу после получения ядерных технологий
-const MISSILE_COST = 350;
+const MISSILE_COST = 250;
 const MISSILE_INCOME_PENALTY = 0.03; // -3% к доходу за КАЖДУЮ когда-либо построенную ракету (накопительно, навсегда)
-const MAX_MISSILES_BUILT = 7; // жёсткий потолок на ракеты за всю игру (на страну)
+const MAX_MISSILES_BUILT = 10; // жёсткий потолок на ракеты за всю игру (на страну)
 const SHIELD_COST = 300;
 const ECOLOGY_COST = 50;
 const ECOLOGY_BONUS = 0.01; // +1% к доходу за уровень экологии
@@ -80,7 +80,7 @@ function canBuildMissiles(country, round) {
   return country.techResearched && country.techReadyRound !== null && round >= country.techReadyRound;
 }
 
-const emptyState = { round: 1, countries: [], log: [], attackLog: [], started: false, ended: false, gmPasswordHash: null };
+const emptyState = { round: 1, countries: [], log: [], attackLog: [], started: false, ended: false, finalStrike: false, gmPasswordHash: null };
 
 // ============================================================================
 // FIREBASE-BACKED STATE (real-time, синхронно на всех устройствах)
@@ -564,15 +564,22 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
     const countries = state.countries.map((c) => ({ ...c, cities: c.cities.map((ci) => ({ ...ci })) }));
     const log = [];
 
-    for (const c of countries) {
-      if (c.eliminated) continue;
-      const income = countryIncome(c);
-      c.gold += income;
-      log.push(`💰 ${c.name}: доход ${income} золота (казна: ${c.gold})`);
+    const isFinalStrike = !!state.finalStrike;
+
+    if (!isFinalStrike) {
+      for (const c of countries) {
+        if (c.eliminated) continue;
+        const income = countryIncome(c);
+        c.gold += income;
+        log.push(`💰 ${c.name}: доход ${income} золота (казна: ${c.gold})`);
+      }
+    } else {
+      log.push(`🎯 Финальный залп: доход и покупки в этом раунде не действуют — только пуск оставшихся ракет.`);
     }
 
     const newlyBuiltMissiles = {}; // ракеты, построенные в этом раунде — станут боеготовыми только со следующего раунда
 
+    if (!isFinalStrike) {
     for (const c of countries) {
       if (c.eliminated) continue;
       const order = orders[c.id];
@@ -624,6 +631,7 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
         city.level = (city.level || 1) + 1;
         log.push(`🏙️ ${c.name}: город ${city.name} прокачан до уровня ${city.level}`);
       }
+    }
     }
 
     const flatLaunches = [];
@@ -694,17 +702,33 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
 
     const remaining = countries.filter((c) => !c.eliminated);
     let ended = state.ended;
+    let finalStrike = false;
     if (remaining.length === 1 && countries.length > 1) {
       log.push(`🏆 ЯДЕРНАЯ ПОБЕДА: ${remaining[0].name}!`);
       ended = true;
-    } else if (!ended && round >= MAX_ROUNDS) {
+    } else if (isFinalStrike) {
+      // это был бонусный раунд с оставшимися ракетами — игра точно заканчивается сейчас
       const ranked = remaining.map((c) => ({ ...c, score: countryScore(c) })).sort((a, b) => b.score - a.score);
       if (ranked.length > 0) {
-        log.push(`🏁 Раунд ${MAX_ROUNDS} завершён — игра окончена. Победитель по очкам: ${ranked[0].name} (${ranked[0].score})`);
+        log.push(`🏁 Финальный залп завершён — игра окончена. Победитель по очкам: ${ranked[0].name} (${ranked[0].score})`);
       } else {
-        log.push(`🏁 Раунд ${MAX_ROUNDS} завершён — игра окончена. Победителей не осталось.`);
+        log.push(`🏁 Финальный залп завершён — игра окончена. Победителей не осталось.`);
       }
       ended = true;
+    } else if (!ended && round >= MAX_ROUNDS) {
+      const someoneHasMissiles = remaining.some((c) => (c.missiles || 0) > 0);
+      if (someoneHasMissiles) {
+        log.push(`🎯 Раунд ${MAX_ROUNDS} завершён — у некоторых стран остались ракеты. Даём один финальный раунд только на их пуск, покупки больше недоступны.`);
+        finalStrike = true;
+      } else {
+        const ranked = remaining.map((c) => ({ ...c, score: countryScore(c) })).sort((a, b) => b.score - a.score);
+        if (ranked.length > 0) {
+          log.push(`🏁 Раунд ${MAX_ROUNDS} завершён — игра окончена. Победитель по очкам: ${ranked[0].name} (${ranked[0].score})`);
+        } else {
+          log.push(`🏁 Раунд ${MAX_ROUNDS} завершён — игра окончена. Победителей не осталось.`);
+        }
+        ended = true;
+      }
     }
 
     saveState({
@@ -714,6 +738,7 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
       log: [...state.log, ...log.map((text) => ({ round, text }))],
       attackLog: [...(state.attackLog || []), ...roundAttacks],
       ended,
+      finalStrike,
     });
     setResolving(false);
     setArmed(false);
@@ -722,8 +747,8 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
   return (
     <div>
       <Header
-        title={state.ended ? "Игра окончена" : `Раунд ${state.round} / ${MAX_ROUNDS}`}
-        subtitle={state.ended ? "Приказы больше не принимаются" : `Приказы: ${submittedCount} / ${activeCountries.length}`}
+        title={state.ended ? "Игра окончена" : state.finalStrike ? "Финальный залп" : `Раунд ${state.round} / ${MAX_ROUNDS}`}
+        subtitle={state.ended ? "Приказы больше не принимаются" : state.finalStrike ? `Только пуск оставшихся ракет · приказы: ${submittedCount} / ${activeCountries.length}` : `Приказы: ${submittedCount} / ${activeCountries.length}`}
         onBack={onBack}
       />
 
@@ -783,7 +808,7 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
         <Panel className="p-5 mb-6">
           <div className="flex items-center justify-between flex-wrap gap-4">
             <div className="font-bold uppercase tracking-wide flex items-center gap-2">
-              <AlertTriangle size={16} className="text-[#E8A33D]" /> Раунд {state.round}
+              <AlertTriangle size={16} className="text-[#E8A33D]" /> {state.finalStrike ? "Финальный залп" : `Раунд ${state.round}`}
             </div>
             <div className="flex items-center gap-3">
               {!armed ? (
@@ -792,7 +817,7 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
                 <>
                   <button onClick={() => setArmed(false)} className="btn-ghost">Отмена</button>
                   <button onClick={resolveRound} disabled={resolving} className="bg-[#D1453A] text-white font-bold uppercase tracking-wide text-sm px-6 py-3 rounded-lg flex items-center gap-2 disabled:opacity-50">
-                    <Rocket size={16} /> Разрешить раунд
+                    <Rocket size={16} /> {state.finalStrike ? "Разрешить финальный залп и завершить игру" : "Разрешить раунд"}
                   </button>
                 </>
               )}
@@ -906,7 +931,7 @@ function BoardView({ state, onBack }) {
     <div>
       <Header
         title="Табло"
-        subtitle={state.ended ? "Игра окончена" : `Раунд ${state.round} / ${MAX_ROUNDS}`}
+        subtitle={state.ended ? "Игра окончена" : state.finalStrike ? "Финальный залп — последние пуски ракет" : `Раунд ${state.round} / ${MAX_ROUNDS}`}
         onBack={onBack}
       />
       <div className="space-y-6">
@@ -1138,12 +1163,20 @@ function OrderForm({ state, countryId, onBack }) {
 
   return (
     <div>
-      <Header title={country.name} subtitle={`Раунд ${state.round} · Приказ`} onBack={onBack} />
+      <Header title={country.name} subtitle={state.finalStrike ? "Финальный залп · только пуск ракет" : `Раунд ${state.round} · Приказ`} onBack={onBack} />
+
+      {state.finalStrike && (
+        <Panel className="p-4 mb-6 border-[#E8A33D]">
+          <p className="text-xs text-[#E8A33D]">
+            Обычные раунды закончились. Это последний шанс запустить оставшиеся ракеты — покупки больше недоступны.
+          </p>
+        </Panel>
+      )}
 
       <Panel className="p-5 mb-6">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mono text-sm">
           <div><div className="text-[#8A93A0] text-xs uppercase mb-1">Казна</div>{country.gold}</div>
-          <div><div className="text-[#8A93A0] text-xs uppercase mb-1">+ доход</div>+{income}</div>
+          <div><div className="text-[#8A93A0] text-xs uppercase mb-1">+ доход</div>+{state.finalStrike ? 0 : income}</div>
           <div><div className="text-[#8A93A0] text-xs uppercase mb-1">Ракеты</div>{country.missiles}</div>
           <div><div className="text-[#8A93A0] text-xs uppercase mb-1">Экология</div>+{country.ecologyLevel * 1}%</div>
         </div>
@@ -1160,6 +1193,7 @@ function OrderForm({ state, countryId, onBack }) {
         </Panel>
       ) : (
         <>
+          {!state.finalStrike && (
           <Panel className="p-5 mb-6">
             <div className="text-sm uppercase tracking-wide text-[#8A93A0] mb-4">Покупки</div>
             <div className="space-y-3">
@@ -1221,6 +1255,7 @@ function OrderForm({ state, countryId, onBack }) {
               </div>
             </div>
           </Panel>
+          )}
 
           <Panel className="p-5 mb-6">
             <div className="text-sm uppercase tracking-wide text-[#8A93A0] mb-3">Пуск ракет</div>
@@ -1255,7 +1290,9 @@ function OrderForm({ state, countryId, onBack }) {
           </Panel>
 
           <Panel className="p-5 flex items-center justify-between flex-wrap gap-4">
-            <div className={`text-sm ${overBudget ? "text-[#D1453A]" : ""}`}>Стоимость: {cost} / {available} доступно</div>
+            <div className={`text-sm ${overLaunches ? "text-[#D1453A]" : ""}`}>
+              {state.finalStrike ? `Пусков выбрано: ${launches.length} / ${totalMissilesAvailable}` : `Стоимость: ${cost} / ${available} доступно`}
+            </div>
             <button onClick={submit} disabled={overBudget || overLaunches} className="bg-[#5FA05B] text-[#0C1A0C] font-bold uppercase tracking-wide text-sm px-6 py-3 rounded-lg flex items-center gap-2 disabled:opacity-30">
               <Check size={16} /> Отправить
             </button>

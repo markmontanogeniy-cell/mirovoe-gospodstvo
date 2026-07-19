@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   Rocket, Target, Check, X, AlertTriangle, Trophy, Radio, Plus, Trash2,
-  ChevronRight, Landmark, Lock, Loader2, LayoutGrid,
+  ChevronRight, Landmark, Lock, Loader2, LayoutGrid, Undo2,
 } from "lucide-react";
 import { db, ref, onValue, set as fbSet } from "./firebase";
 
@@ -143,6 +143,10 @@ function useMyOrder(round, countryId) {
 
 function saveOrder(round, countryId, order) {
   fbSet(ref(db, `orders/${round}/${countryId}`), order);
+}
+
+function recallOrder(round, countryId) {
+  fbSet(ref(db, `orders/${round}/${countryId}`), null);
 }
 
 function resetGame() {
@@ -1190,6 +1194,13 @@ function OrderForm({ state, countryId, onBack }) {
         <Panel className="p-6 mb-6 border-[#5FA05B] text-center">
           <Check className="mx-auto text-[#5FA05B] mb-2" size={28} />
           <div className="font-bold uppercase tracking-wide">Приказ отправлен</div>
+          <p className="text-xs text-[#8A93A0] mt-2">Пока ведущий не разрешил раунд, приказ можно отозвать и изменить.</p>
+          <button
+            onClick={() => recallOrder(state.round, countryId)}
+            className="btn-ghost border-[#D1453A] text-[#D1453A] mt-4 inline-flex items-center gap-2"
+          >
+            <Undo2 size={14} /> Отозвать приказ
+          </button>
         </Panel>
       ) : (
         <>

@@ -20,6 +20,7 @@ const CITY_LEVEL_INCOME = [100, 150, 200];
 const LEVEL_UP_COST = { 2: 50, 3: 75 }; // цена апгрейда ДО уровня 2 / ДО уровня 3
 const MAX_CITY_LEVEL = 3;
 const MAX_ECOLOGY_LEVEL = 10; // потолок суммарного бонуса экологии: +10% (10 уровней)
+const MAX_ROUNDS = 6; // игра принудительно заканчивается после этого раунда, побеждает лучший по очкам
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -65,6 +66,14 @@ function countryIncome(country) {
 
 function aliveCities(country) {
   return country.cities.filter((c) => c.alive);
+}
+
+function countryScore(c) {
+  const cityValue = c.cities.reduce(
+    (sum, ci) => (ci.alive ? sum + CITY_LEVEL_INCOME[(ci.level || 1) - 1] * 3 : sum),
+    0
+  );
+  return c.gold + cityValue + c.missiles * 5;
 }
 
 function canBuildMissiles(country, round) {
@@ -619,12 +628,20 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
       }
     }
     for (const l of flatLaunches) {
+      const attacker = countries.find((c) => c.id === l.attackerId);
+      const attackerName = attacker ? attacker.name : "?";
       const target = countries.find((c) => c.id === l.targetCountryId);
-      if (!target || target.eliminated) continue;
+      if (!target || target.eliminated) {
+        log.push(`💨 Ракета ${attackerName} → ${l.targetCity}: страна-цель уже выбыла, ракета потрачена впустую`);
+        continue;
+      }
       const city = target.cities.find((ci) => ci.name === l.targetCity);
-      if (!city || !city.alive) continue;
-      if (city.shielded) { city.shielded = false; log.push(`🛡️💥 Щит города ${city.name} (${target.name}) сбит`); }
-      else { city.alive = false; log.push(`💥 Город ${city.name} (${target.name}) уничтожен!`); }
+      if (!city || !city.alive) {
+        log.push(`💨 Ракета ${attackerName} → город ${l.targetCity} (${target.name}) уже был уничтожен ранее в этом раунде — ракета потрачена впустую`);
+        continue;
+      }
+      if (city.shielded) { city.shielded = false; log.push(`🛡️💥 Ракета ${attackerName} → щит города ${city.name} (${target.name}) сбит`); }
+      else { city.alive = false; log.push(`💥 Ракета ${attackerName} → город ${city.name} (${target.name}) уничтожен!`); }
     }
 
     for (const c of countries) {
@@ -640,7 +657,18 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
 
     const remaining = countries.filter((c) => !c.eliminated);
     let ended = state.ended;
-    if (remaining.length === 1 && countries.length > 1) { log.push(`🏆 ЯДЕРНАЯ ПОБЕДА: ${remaining[0].name}!`); ended = true; }
+    if (remaining.length === 1 && countries.length > 1) {
+      log.push(`🏆 ЯДЕРНАЯ ПОБЕДА: ${remaining[0].name}!`);
+      ended = true;
+    } else if (!ended && round >= MAX_ROUNDS) {
+      const ranked = remaining.map((c) => ({ ...c, score: countryScore(c) })).sort((a, b) => b.score - a.score);
+      if (ranked.length > 0) {
+        log.push(`🏁 Раунд ${MAX_ROUNDS} завершён — игра окончена. Победитель по очкам: ${ranked[0].name} (${ranked[0].score})`);
+      } else {
+        log.push(`🏁 Раунд ${MAX_ROUNDS} завершён — игра окончена. Победителей не осталось.`);
+      }
+      ended = true;
+    }
 
     saveState({ ...state, countries, round: round + 1, log: [...state.log, ...log.map((text) => ({ round, text }))], ended });
     setResolving(false);
@@ -649,13 +677,29 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
 
   return (
     <div>
-      <Header title={`Раунд ${state.round}`} subtitle={`Приказы: ${submittedCount} / ${activeCountries.length}`} onBack={onBack} />
+      <Header
+        title={state.ended ? "Игра окончена" : `Раунд ${state.round} / ${MAX_ROUNDS}`}
+        subtitle={state.ended ? "Приказы больше не принимаются" : `Приказы: ${submittedCount} / ${activeCountries.length}`}
+        onBack={onBack}
+      />
 
-      {state.ended && (
-        <Panel className="p-5 mb-6 border-[#E8A33D]">
-          <div className="flex items-center gap-2 text-[#E8A33D] font-bold uppercase mb-2"><Trophy size={18} /> Игра окончена</div>
-        </Panel>
-      )}
+      {state.ended && (() => {
+        const remaining = state.countries.filter((c) => !c.eliminated);
+        const nuclearWinner = remaining.length === 1 && state.countries.length > 1 ? remaining[0] : null;
+        const ranked = remaining.map((c) => ({ ...c, score: countryScore(c) })).sort((a, b) => b.score - a.score);
+        const winner = nuclearWinner || ranked[0] || null;
+        return (
+          <Panel className="p-5 mb-6 border-[#E8A33D]">
+            <div className="flex items-center gap-2 text-[#E8A33D] font-bold uppercase mb-2"><Trophy size={18} /> Игра окончена</div>
+            {winner && (
+              <p className="text-sm">
+                Победитель: <b>{winner.name}</b>
+                {nuclearWinner ? " (ядерная победа)" : ` (по очкам: ${winner.score})`}
+              </p>
+            )}
+          </Panel>
+        );
+      })()}
 
       <div className="grid sm:grid-cols-2 gap-4 mb-6">
         {state.countries.map((c) => {
@@ -725,14 +769,7 @@ function GmDashboard({ state, saveState, onBack, onFullReset }) {
 
 function ScoreTable({ countries }) {
   const scored = countries
-    .map((c) => {
-      const cityValue = c.cities.reduce(
-        (sum, ci) => (ci.alive ? sum + CITY_LEVEL_INCOME[(ci.level || 1) - 1] * 3 : sum),
-        0
-      );
-      const score = c.gold + cityValue + c.missiles * 5;
-      return { ...c, score };
-    })
+    .map((c) => ({ ...c, score: countryScore(c) }))
     .sort((a, b) => b.score - a.score);
   return (
     <Panel className="p-5 mb-6">
@@ -821,6 +858,20 @@ function OrderForm({ state, countryId, onBack }) {
   const [launchTargetCity, setLaunchTargetCity] = useState("");
 
   if (!country) return null;
+
+  if (state.ended) {
+    return (
+      <div>
+        <Header title={country.name} subtitle="Игра окончена" onBack={onBack} />
+        <Panel className="p-6 mb-6 border-[#E8A33D] text-center">
+          <Trophy className="mx-auto text-[#E8A33D] mb-2" size={28} />
+          <div className="font-bold uppercase tracking-wide">Игра завершена</div>
+          <p className="text-[#8A93A0] text-sm mt-2">Приказы больше не принимаются. Результаты уточните у ведущего.</p>
+        </Panel>
+      </div>
+    );
+  }
+
   const submitted = !!existingOrder;
 
   const income = countryIncome(country);
@@ -923,8 +974,13 @@ function OrderForm({ state, countryId, onBack }) {
                 <div className="text-sm mb-2">Щиты — {SHIELD_COST} золота</div>
                 <div className="flex flex-wrap gap-2">
                   {aliveCities(country).map((ci) => (
-                    <button key={ci.name} onClick={() => toggleShield(ci.name)} className={`text-xs px-3 py-1.5 rounded-full border ${buyShields.includes(ci.name) ? "border-[#5FA05B] bg-[#5FA05B22]" : "border-[#2A3138]"}`}>
-                      {ci.name}
+                    <button
+                      key={ci.name}
+                      disabled={ci.shielded}
+                      onClick={() => toggleShield(ci.name)}
+                      className={`text-xs px-3 py-1.5 rounded-full border disabled:opacity-30 disabled:cursor-not-allowed ${buyShields.includes(ci.name) ? "border-[#5FA05B] bg-[#5FA05B22]" : "border-[#2A3138]"}`}
+                    >
+                      {ci.name}{ci.shielded ? " (уже под щитом)" : ""}
                     </button>
                   ))}
                 </div>

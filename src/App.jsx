@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   Rocket, Target, Check, X, AlertTriangle, Trophy, Radio, Plus, Trash2,
-  ChevronRight, Landmark, Lock, Loader2,
+  ChevronRight, Landmark, Lock, Loader2, LayoutGrid, ShieldCheck,
 } from "lucide-react";
 import { db, ref, onValue, set as fbSet } from "./firebase";
 
@@ -225,6 +225,7 @@ function AppInner() {
       {!role && <RoleSelect onSelect={setRole} />}
       {role === "gm" && <GmView state={state} saveState={saveState} onBack={() => setRole(null)} onFullReset={fullReset} />}
       {role === "player" && <PlayerView state={state} onBack={() => setRole(null)} />}
+      {role === "board" && <BoardView state={state} onBack={() => setRole(null)} />}
     </Shell>
   );
 }
@@ -356,6 +357,14 @@ function RoleSelect({ onSelect }) {
           <p className="text-[#8A93A0] text-sm mt-2">Выберите свою страну и отправьте приказ на раунд.</p>
           <div className="flex items-center gap-1 text-[#5FA05B] text-xs uppercase tracking-wide mt-4 opacity-0 group-hover:opacity-100 transition">
             Отправить приказ <ChevronRight size={14} />
+          </div>
+        </button>
+        <button onClick={() => onSelect("board")} className="text-left p-6 rounded-xl border border-[#2A3138] bg-[#171B1F] hover:border-[#4C8BF5] transition group sm:col-span-2">
+          <LayoutGrid className="text-[#4C8BF5] mb-4" size={28} />
+          <div className="text-lg font-bold uppercase tracking-wide">Табло для игроков</div>
+          <p className="text-[#8A93A0] text-sm mt-2">Крупный экран со всеми странами и городами — что уничтожено, что живо, что под щитом. Без пароля, можно показывать всем на проекторе.</p>
+          <div className="flex items-center gap-1 text-[#4C8BF5] text-xs uppercase tracking-wide mt-4 opacity-0 group-hover:opacity-100 transition">
+            Открыть табло <ChevronRight size={14} />
           </div>
         </button>
       </div>
@@ -872,6 +881,81 @@ function AttackSummary({ attackLog }) {
         ))}
       </div>
     </Panel>
+  );
+}
+
+// ============================================================================
+// BOARD VIEW (табло для игроков — без пароля, только для показа)
+// ============================================================================
+const BOARD_COLORS = [
+  "#E8C233", "#4A2511", "#1AA69C", "#8DB92E", "#A72FC2",
+  "#3D7FE0", "#D1453A", "#2FA85A", "#E8863D", "#6B5FD1",
+];
+
+function BoardView({ state, onBack }) {
+  if (!state.started) {
+    return (
+      <div>
+        <Header title="Табло" subtitle="Мировое господство" onBack={onBack} />
+        <Panel className="p-8 text-center text-[#8A93A0]">Игра ещё не началась</Panel>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <Header
+        title="Табло"
+        subtitle={state.ended ? "Игра окончена" : `Раунд ${state.round} / ${MAX_ROUNDS}`}
+        onBack={onBack}
+      />
+      <div className="space-y-6">
+        {state.countries.map((country, i) => {
+          const color = BOARD_COLORS[i % BOARD_COLORS.length];
+          return (
+            <div key={country.id} className="rounded-xl overflow-hidden border border-[#2A3138]" style={{ opacity: country.eliminated ? 0.45 : 1 }}>
+              <div
+                className="px-5 py-4 flex items-center justify-center"
+                style={{ background: color }}
+              >
+                <span
+                  className="text-2xl sm:text-3xl font-black uppercase tracking-wide text-white text-center"
+                  style={{ textShadow: "0 2px 6px rgba(0,0,0,0.45)" }}
+                >
+                  {country.name}
+                  {country.eliminated && " · ВЫБЫЛА"}
+                </span>
+              </div>
+              <div className="bg-white px-5 py-5 flex flex-wrap items-center justify-center gap-x-8 gap-y-3">
+                {country.cities.map((ci) => (
+                  <div key={ci.name} className="flex flex-col items-center">
+                    <span
+                      className={`text-lg sm:text-xl font-black uppercase tracking-wide ${
+                        !ci.alive ? "text-[#C6482E] line-through decoration-4" : "text-[#111417]"
+                      }`}
+                    >
+                      {ci.capital ? "★ " : ""}
+                      {ci.name}
+                    </span>
+                    <span className="mt-1 text-[11px] font-bold uppercase tracking-wide">
+                      {!ci.alive ? (
+                        <span className="text-[#C6482E]">уничтожен</span>
+                      ) : ci.shielded ? (
+                        <span className="text-[#2FA85A] flex items-center gap-1">
+                          <ShieldCheck size={13} /> под щитом
+                        </span>
+                      ) : (
+                        <span className="text-[#8A93A0]">Ур.{ci.level || 1}</span>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

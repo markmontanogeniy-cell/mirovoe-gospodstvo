@@ -122,9 +122,51 @@ function resetGame() {
 }
 
 // ============================================================================
+// ERROR BOUNDARY (чтобы вместо белого экрана было видно, что сломалось)
+// ============================================================================
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error("App crashed:", error, info);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <Shell>
+          <Header title="Что-то сломалось" subtitle="Ошибка в приложении — текст ниже поможет её найти" />
+          <Panel className="p-5">
+            <pre className="mono text-xs text-[#D1453A] whitespace-pre-wrap break-words">
+              {String(this.state.error && (this.state.error.stack || this.state.error.message || this.state.error))}
+            </pre>
+            <button onClick={() => window.location.reload()} className="btn-ghost mt-4">
+              Перезагрузить страницу
+            </button>
+          </Panel>
+        </Shell>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppInner />
+    </ErrorBoundary>
+  );
+}
+
+// ============================================================================
 // ROOT
 // ============================================================================
-export default function App() {
+function AppInner() {
   const [role, setRole] = useState(null);
   const [state, saveState, loaded] = useGameState();
 
@@ -870,5 +912,4 @@ function NumberStepper({ value, setValue, disabled }) {
     </div>
   );
 }
-
 
